@@ -122,6 +122,10 @@ SECCIONES = {
     },
 }
 
+# Dirección pública de la página (para Google: enlace canónico, sitemap.xml y robots.txt).
+# Dejalo vacío ("") si la usás solo en tu casa.
+SITIO_URL = "https://perreo404.github.io/pelis/"
+
 PAIS = "ar"
 ZONA = ZoneInfo("America/Argentina/Cordoba")
 PUNTAJE_MINIMO_RANKING = 6.0  # en "Mejores películas" solo se muestran las de este puntaje o más
@@ -559,12 +563,60 @@ def generar_html(pelis, dias, ahora, archivo, secciones=None):
     if os.path.dirname(archivo):
         os.makedirs(os.path.dirname(archivo), exist_ok=True)
     with open(archivo, "w", encoding="utf-8") as f:
-        f.write(PLANTILLA.replace("/*__DATOS__*/null", js))
+        f.write(rellenar_seo(PLANTILLA, pelis, dias, ahora).replace("/*__DATOS__*/null", js))
+    if SITIO_URL:
+        carpeta = os.path.dirname(archivo) or "."
+        with open(os.path.join(carpeta, "robots.txt"), "w") as f:
+            f.write(f"User-agent: *\nAllow: /\nSitemap: {SITIO_URL}sitemap.xml\n")
+        with open(os.path.join(carpeta, "sitemap.xml"), "w") as f:
+            f.write('<?xml version="1.0" encoding="UTF-8"?>\n'
+                    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+                    f"  <url><loc>{SITIO_URL}</loc><lastmod>{ahora:%Y-%m-%d}</lastmod>"
+                    "<changefreq>daily</changefreq></url>\n</urlset>\n")
     print(f"Listo: {os.path.abspath(archivo)}  ({len(pelis)} películas, "
           f"{len(datos['progs'])} programas más, {len(datos_dias)} días)")
     print("Para verla en el celular (misma red WiFi):")
     print("  python3 -m http.server 8000")
     print("  y en el celular abrí  http://<IP de tu PC>:8000/" + os.path.basename(archivo))
+
+
+def anio_txt(p):
+    return f" ({p['anio']})" if p["anio"] else ""
+
+
+def rellenar_seo(html, pelis, dias, ahora):
+    """Textos para buscadores: descripción, intro y una lista fija con las mejores
+    pelis de hoy (la página la reemplaza al cargar, pero Google la lee igual)."""
+    import html as h
+    presentes = {p["canal"] for p in pelis}
+    canales = [c for c in CANALES.values() if c in presentes]   # en el orden de CANALES
+    lista_canales = ", ".join(canales[:-1]) + " y " + canales[-1] if len(canales) > 1 else "".join(canales)
+    hoy = [p for p in pelis if max(dia_tv(p), dias[0]) == dias[0] and p["fin"] > ahora
+           and (p["puntaje"] or 0) >= PUNTAJE_MINIMO_RANKING]
+    hoy.sort(key=lambda p: p["inicio"])
+    destacadas = sorted(hoy, key=lambda p: p["puntaje"], reverse=True)[:3]
+    fecha = f"{NOMBRES_DIA[dias[0].weekday()].lower()} {dias[0]:%d/%m}"
+    desc = (f"Qué películas buenas dan hoy en el cable de Argentina: {', '.join(canales[:6])} y más, "
+            "ordenadas por puntaje, con horarios y una rutina sin superposiciones.")
+    intro = (f"Programación de películas de {lista_canales}, con puntaje de cada una y horarios "
+             f"en hora argentina. Hoy, {fecha}, se destacan "
+             + ", ".join(f"{p['titulo']} ({p['puntaje']:.1f}, {p['canal']} {p['inicio']:%H:%M})" for p in destacadas)
+             + ".") if destacadas else f"Programación de películas de {lista_canales}, con puntaje y horarios."
+    estatico = "<ul>" + "".join(
+        f'<li class="seo-li">{p["inicio"]:%H:%M} · {h.escape(p["titulo"])}'
+        f'{anio_txt(p)} · {h.escape(p["canal"])}'
+        f' · {p["puntaje"]:.1f}</li>' for p in hoy) + "</ul>" if hoy else ""
+    jsonld = json.dumps({
+        "@context": "https://schema.org", "@type": "WebSite", "inLanguage": "es-AR",
+        "name": "Mejores películas hoy en la tele · Argentina", "description": desc,
+        **({"url": SITIO_URL} if SITIO_URL else {}),
+    }, ensure_ascii=False).replace("</", "<\\/")
+    canonical = f'<link rel="canonical" href="{h.escape(SITIO_URL)}">' if SITIO_URL else ""
+    return (html.replace("__DESCRIPCION__", h.escape(desc, quote=True))
+                .replace("__CANONICAL__", canonical)
+                .replace("__JSONLD__", jsonld)
+                .replace("__INTRO__", h.escape(intro))
+                .replace("__ESTATICO__", estatico))
 
 
 NOMBRES_DIA = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
@@ -576,12 +628,20 @@ def dia_tv(p):
 
 
 PLANTILLA = r'''<!doctype html>
-<html lang="es">
+<html lang="es-AR">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0e0d12">
-<title>En la tele</title>
+<title>Mejores películas hoy en la tele · Argentina</title>
+<meta name="description" content="__DESCRIPCION__">
+<meta name="robots" content="index, follow">
+__CANONICAL__
+<meta property="og:type" content="website">
+<meta property="og:locale" content="es_AR">
+<meta property="og:title" content="Mejores películas hoy en la tele · Argentina">
+<meta property="og:description" content="__DESCRIPCION__">
+<script type="application/ld+json">__JSONLD__</script>
 <style>
 :root{
   --bg:#0e0d12; --panel:#17161d; --panel2:#201f28; --line:#2c2a36;
@@ -693,6 +753,12 @@ main{display:flex;flex-direction:column;gap:14px;padding:6px 16px}
 .hueco::before,.hueco::after{content:"";flex:1;border-top:1px dashed var(--line)}
 .vacio{text-align:center;color:var(--dim);padding:50px 20px}
 .nota{text-align:center;color:var(--dim);font-size:11px;padding:20px 16px 0}
+.nota p + p{margin-top:6px}
+.nota a{color:var(--sub)}
+.intro{padding:14px 16px 0}
+.intro h2{font-size:15px;font-weight:700;color:var(--sub)}
+.intro p{font-size:12.5px;color:var(--dim);margin-top:3px}
+.seo-li{list-style:none;padding:8px 0;border-bottom:1px solid var(--line);font-size:14px;color:var(--sub)}
 @media (min-width:720px){.grupo{grid-column:1/-1}main{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));max-width:1200px;margin:0 auto}
   .hueco{grid-column:1/-1}}
 </style>
@@ -722,9 +788,19 @@ main{display:flex;flex-direction:column;gap:14px;padding:6px 16px}
     <div class="canales" id="canales"></div>
   </div>
 </header>
+<section class="intro solo-pelis">
+  <h2>Qué películas buenas dan hoy en el cable</h2>
+  <p>__INTRO__</p>
+</section>
 <div class="cuenta" id="cuenta"></div>
-<main id="lista"></main>
-<p class="nota">Horarios de mi.tv · Puntajes de IMDb (vía mi.tv) y TMDB · Tocá un programa para ver de qué trata</p>
+<main id="lista">__ESTATICO__</main>
+<footer class="nota">
+  <p>Tocá un programa para ver de qué trata. Se actualiza automáticamente todos los días.</p>
+  <p>Horarios: <a href="https://mi.tv/ar" rel="nofollow">mi.tv</a> · Puntajes: IMDb (vía mi.tv) y
+    <a href="https://www.themoviedb.org" rel="nofollow">TMDB</a>.<br>
+    Este producto usa la API de TMDB pero no está avalado ni certificado por TMDB.</p>
+  <p>Proyecto personal sin fines comerciales.</p>
+</footer>
 
 <script>
 const D = /*__DATOS__*/null;
