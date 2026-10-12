@@ -5,7 +5,7 @@ mejores_pelis.py - Las mejores películas del día en la TV (datos de mi.tv)
 Descarga la programación de los canales que elijas, se queda con las películas,
 completa el puntaje de las que no lo traen (opcional, con TMDB) y te muestra:
   1) el ranking de las mejores del día
-  2) una "rutina" de películas que no se pisan entre sí
+  2) una "rutina" de películas
 
 Uso:
     python3 mejores_pelis.py              # hoy
@@ -53,10 +53,10 @@ CANALES = {
     "amc": "AMC",
     "warner-channel": "Warner",
     "sony": "Sony",
-    # "hbo": "HBO",          # descomentá si algún día lo tenés
-    # "tcm": "TCM",
-    # "paramount-channel": "Paramount",
-    # "studio-universal": "Studio Universal",
+    #"hbo": "HBO",
+    "tcm": "TCM",
+    "paramount-channel": "Paramount",
+    "studio-universal": "Studio Universal",
 }
 
 PAIS = "ar"
