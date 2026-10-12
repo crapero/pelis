@@ -53,10 +53,14 @@ CANALES = {
     "amc": "AMC",
     "warner-channel": "Warner",
     "sony": "Sony",
-    # "hbo": "HBO",          # descomentá si algún día lo tenés
+    "cinemax-sur": "Cinemax",
     "tcm": "TCM",
     "paramount-channel": "Paramount",
     "studio-universal": "Studio Universal",
+    "fx-movies": "FX Movies",
+    "golden": "Golden",
+    "i-sat": "I-SAT",
+    # "hbo": "HBO",          # descomentá si algún día lo tenés
 }
 
 # Secciones extra de la página (--html): solo se muestran con sus horarios, sin rutina.
@@ -68,6 +72,12 @@ SECCIONES = {
         "tnt-series": "TNT Series",
         "comedy-central": "Comedy Central",
         "a-e-mundo": "A&E",
+        "fox-1-este": "Star Series",
+        "fox-life": "Star Life",
+        "syfy": "Syfy",
+        "lifetime": "Lifetime",
+        "atreseries": "Atreseries",
+        "tru-tv": "TruTV",
     },
     "deportes": {
         "tyc-sports": "TyC Sports",
@@ -75,6 +85,16 @@ SECCIONES = {
         "espn-2": "ESPN 2",
         "fox-sports-cono-sur-capital": "FOX Sports",
         "tnt-sports": "TNT Sports",
+        "dxtv": "DeporTV",
+        "tyc-alternativa": "TyC Sports 2",
+        "espn-3": "ESPN 3",
+        "espn-1": "ESPN Extra",
+        "fox-sports-2": "FOX Sports 2",
+        "fox-sports-3": "FOX Sports 3",
+        "fox-sports-premium": "FOX Sports Premium",
+        "gol-tv": "Gol TV",
+        "nba-tv": "NBA TV",
+        "america-sports": "América Sports",
     },
     "noticias": {
         "tn": "TN",
@@ -82,12 +102,23 @@ SECCIONES = {
         "la-nacion": "LN+",
         "america-24": "A24",
         "cronica": "Crónica",
+        "26-tv": "Canal 26",
+        "cn-23": "CN23",
+        "cnn-en-espanol": "CNN en Español",
+        "cba-24n": "Canal U",
     },
     "aire": {
         "telefe": "Telefe",
         "el-trece": "Canal 13",
         "america-2-capital": "América",
         "teleocho": "Telefe Córdoba",
+    },
+    "documentales": {
+        "discovery": "Discovery",
+        "national-geographic": "Nat Geo",
+        "history": "History",
+        "animal-planet": "Animal Planet",
+        "investigation-discovery": "ID",
     },
 }
 
@@ -429,7 +460,7 @@ def main():
             "series": [p for p in programas + extras if es_episodio(p)
                        and (p["slug"] in CANALES or p["slug"] in SECCIONES["series"])],
         }
-        for nombre in ("deportes", "noticias", "aire"):
+        for nombre in ("deportes", "noticias", "aire", "documentales"):
             secciones[nombre] = [p for p in extras if p["slug"] in SECCIONES[nombre]]
         completar_series(secciones["series"])
         generar_html(pelis, dias, ahora, args.html, secciones)
@@ -704,7 +735,7 @@ const hhmm = d => d.toLocaleTimeString("es-AR", {hour:"2-digit", minute:"2-digit
 const pelis = D.pelis.map((p, i) => ({...p, i, ini:new Date(p.ini), fin:new Date(p.fin)}));
 const abiertos = new Set();   // lo que el usuario desplegó (sobrevive al redibujado)
 const progs = (D.progs || []).map((p, i) => ({...p, i, ini:new Date(p.ini), fin:new Date(p.fin)}));
-const SECS = [["pelis", "Películas"], ["series", "Series"], ["deportes", "Deportes"], ["noticias", "Noticias"], ["aire", "Aire"]]
+const SECS = [["pelis", "Películas"], ["series", "Series"], ["deportes", "Deportes"], ["noticias", "Noticias"], ["aire", "Aire"], ["documentales", "Documentales"]]
   .filter(([k]) => k === "pelis" || progs.some(p => p.s === k));
 const canalesDe = sec => [...new Set((sec === "pelis" ? pelis : progs.filter(p => p.s === sec)).map(p => p.canal))].sort();
 
