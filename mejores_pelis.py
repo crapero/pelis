@@ -54,9 +54,9 @@ CANALES = {
     "warner-channel": "Warner",
     "sony": "Sony",
     # "hbo": "HBO",          # descomentá si algún día lo tenés
-    # "tcm": "TCM",
-    # "paramount-channel": "Paramount",
-    # "studio-universal": "Studio Universal",
+    "tcm": "TCM",
+    "paramount-channel": "Paramount",
+    "studio-universal": "Studio Universal",
 }
 
 # Secciones extra de la página (--html): solo se muestran con sus horarios, sin rutina.
