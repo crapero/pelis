@@ -54,9 +54,41 @@ CANALES = {
     "warner-channel": "Warner",
     "sony": "Sony",
     # "hbo": "HBO",          # descomentá si algún día lo tenés
-    "tcm": "TCM",
-    "paramount-channel": "Paramount",
-    "studio-universal": "Studio Universal",
+    # "tcm": "TCM",
+    # "paramount-channel": "Paramount",
+    # "studio-universal": "Studio Universal",
+}
+
+# Secciones extra de la página (--html): solo se muestran con sus horarios, sin rutina.
+# Las series también se juntan de los canales de películas de arriba.
+SECCIONES = {
+    "series": {
+        "universal-channel": "Universal TV",
+        "axn": "AXN",
+        "tnt-series": "TNT Series",
+        "comedy-central": "Comedy Central",
+        "a-e-mundo": "A&E",
+    },
+    "deportes": {
+        "tyc-sports": "TyC Sports",
+        "espn": "ESPN",
+        "espn-2": "ESPN 2",
+        "fox-sports-cono-sur-capital": "FOX Sports",
+        "tnt-sports": "TNT Sports",
+    },
+    "noticias": {
+        "tn": "TN",
+        "c5n": "C5N",
+        "la-nacion": "LN+",
+        "america-24": "A24",
+        "cronica": "Crónica",
+    },
+    "aire": {
+        "telefe": "Telefe",
+        "el-trece": "Canal 13",
+        "america-2-capital": "América",
+        "teleocho": "Telefe Córdoba",
+    },
 }
 
 PAIS = "ar"
@@ -134,7 +166,7 @@ def leer_grilla(html, canal, fecha, todo=False):
         sinopsis = li.select_one("p.synopsis")
         p = {
             "img": img, "sinopsis": " ".join(sinopsis.text.split()) if sinopsis else "",
-            "canal": CANALES[canal], "titulo": titulo.text.strip(), "genero": genero,
+            "canal": nombre_canal(canal), "slug": canal, "titulo": titulo.text.strip(), "genero": genero,
             "anio": anio, "puntaje": puntaje, "fuente": "mi.tv" if puntaje else None,
             "inicio": inicio, "fin": None, "href": href, "sub": subtitulo, "original": original,
         }
@@ -148,6 +180,21 @@ def leer_grilla(html, canal, fecha, todo=False):
         p["inicio"] = p["inicio"].astimezone(ZONA)
         p["fin"] = p["fin"].astimezone(ZONA)
     return programas if todo else [p for p in programas if es_pelicula(p)]
+
+
+def nombre_canal(slug):
+    if slug in CANALES:
+        return CANALES[slug]
+    for canales in SECCIONES.values():
+        if slug in canales:
+            return canales[slug]
+    return slug
+
+
+def es_episodio(p):
+    """Episodio de una serie: enlace .../algo-s05e10 o subtítulo 'Temporada 5 Episodio 10'."""
+    return bool(re.search(r"-s\d+e\d+$", p["href"]) or
+                re.search(r"episodio|temporada", p["sub"], re.I))
 
 
 def es_pelicula(p):
@@ -245,6 +292,42 @@ def completar_puntajes(pelis, todas=False):
     guardar_cache(cache)
 
 
+def completar_series(episodios):
+    """Puntaje e imagen de TMDB para cada serie (una consulta por serie, no por episodio)."""
+    clave = os.environ.get("TMDB_API_KEY")
+    if not clave or not episodios:
+        return
+    cache = cargar_cache()
+    titulos = sorted({p["titulo"] for p in episodios})
+    for k, titulo in enumerate(titulos, 1):
+        llave = f"serie|{titulo}"
+        if llave in cache:
+            continue
+        print(f"\rConsultando series en TMDB... {k}/{len(titulos)}", end="", file=sys.stderr)
+        try:
+            r = requests.get("https://api.themoviedb.org/3/search/tv", timeout=15,
+                             params={"api_key": clave, "query": titulo, "language": "es-AR"})
+            res = [x for x in r.json().get("results", []) if x.get("vote_count", 0) >= 20]
+        except (requests.RequestException, ValueError):
+            continue
+        if res:
+            s = max(res, key=lambda x: x["vote_count"])
+            ruta = s.get("backdrop_path") or s.get("poster_path")
+            cache[llave] = {"puntaje": round(s["vote_average"], 1),
+                            "img": f"https://image.tmdb.org/t/p/w300{ruta}" if ruta else None,
+                            "sinopsis": s.get("overview") or ""}
+        else:
+            cache[llave] = None
+    print("\r" + " " * 40 + "\r", end="", file=sys.stderr)
+    guardar_cache(cache)
+    for p in episodios:
+        datos = cache.get(f"serie|{p['titulo']}")
+        if datos:
+            p["puntaje"], p["fuente"] = datos["puntaje"], "TMDB"
+            p["img"] = p["img"] or datos["img"]
+            p["sinopsis"] = p["sinopsis"] or datos["sinopsis"]
+
+
 # ------------------------------------------------------- rutina sin choques
 def armar_rutina(pelis):
     """Elige pelis que no se superpongan maximizando 'cuánto valen' en total.
@@ -334,28 +417,22 @@ def main():
             print(f"{tipo}{p['inicio']:%d/%m %H:%M}  {p['titulo']}  |  {p['sub']}  |  {p['href']}")
         return
 
-    # Bajar cada día de cada canal. Las grillas se pisan un poco entre días
-    # (la de hoy trae la madrugada siguiente), así que se eliminan repetidas.
-    vistas, pelis = set(), []
-    for dia in dias:
-        fecha = dia.strftime("%Y-%m-%d")
-        for canal in CANALES:
-            try:
-                for p in leer_grilla(descargar_canal(canal, fecha), canal, fecha):
-                    clave = (p["canal"], p["inicio"])
-                    if clave not in vistas:
-                        vistas.add(clave)
-                        pelis.append(p)
-            except requests.RequestException as e:
-                print(f"No pude bajar {CANALES[canal]} del {fecha}: {e}", file=sys.stderr)
-            time.sleep(0.5)   # no saturar el sitio
-
+    programas = bajar(list(CANALES), dias)
+    pelis = [p for p in programas if es_pelicula(p)]
     if not pelis:
         sys.exit("No encontré películas. Puede que mi.tv haya cambiado su página.")
 
     if args.html:
         completar_puntajes(pelis, todas=True)   # también trae imágenes y sinopsis
-        generar_html(pelis, dias, ahora, args.html)
+        extras = bajar([c for sec in SECCIONES.values() for c in sec if c not in CANALES], dias)
+        secciones = {
+            "series": [p for p in programas + extras if es_episodio(p)
+                       and (p["slug"] in CANALES or p["slug"] in SECCIONES["series"])],
+        }
+        for nombre in ("deportes", "noticias", "aire"):
+            secciones[nombre] = [p for p in extras if p["slug"] in SECCIONES[nombre]]
+        completar_series(secciones["series"])
+        generar_html(pelis, dias, ahora, args.html, secciones)
         return
 
     if not args.todo_el_dia:
@@ -388,7 +465,30 @@ def main():
         print("\n* puntaje sacado de TMDB (mi.tv no lo tenía)")
 
 
-def generar_html(pelis, dias, ahora, archivo):
+def bajar(canales, dias):
+    """Baja la grilla completa de cada canal y cada día. Las grillas se pisan un poco
+    entre días (la de hoy trae la madrugada siguiente), así que se eliminan repetidos."""
+    vistos, programas = set(), []
+    total, n = len(canales) * len(dias), 0
+    for dia in dias:
+        fecha = dia.strftime("%Y-%m-%d")
+        for canal in canales:
+            n += 1
+            print(f"\rBajando programación... {n}/{total}", end="", file=sys.stderr)
+            try:
+                for p in leer_grilla(descargar_canal(canal, fecha), canal, fecha, todo=True):
+                    clave = (canal, p["inicio"])
+                    if clave not in vistos:
+                        vistos.add(clave)
+                        programas.append(p)
+            except requests.RequestException as e:
+                print(f"\nNo pude bajar {nombre_canal(canal)} del {fecha}: {e}", file=sys.stderr)
+            time.sleep(0.5)   # no saturar el sitio
+    print("\r" + " " * 40 + "\r", end="", file=sys.stderr)
+    return programas
+
+
+def generar_html(pelis, dias, ahora, archivo, secciones=None):
     """Arma una página para el celular con TODAS las pelis; los filtros se manejan ahí."""
     en_rutina, alts_de = set(), {}
     indice = {id(p): i for i, p in enumerate(pelis)}
@@ -416,13 +516,21 @@ def generar_html(pelis, dias, ahora, archivo):
             "sinopsis": p["sinopsis"], "dia": max(dia_tv(p), dias[0]).isoformat(),
             "rutina": id(p) in en_rutina, "alts": alts_de.get(id(p), []),
         } for p in pelis],
+        "progs": [{
+            "s": nombre, "titulo": p["titulo"], "sub": p["sub"], "canal": p["canal"],
+            "ini": p["inicio"].isoformat(), "fin": p["fin"].isoformat(),
+            "puntaje": p["puntaje"], "img": p["img"], "sinopsis": p["sinopsis"],
+            "dia": max(dia_tv(p), dias[0]).isoformat(),
+        } for nombre, lista in (secciones or {}).items()
+          for p in sorted(lista, key=lambda p: p["inicio"])],
     }
     js = json.dumps(datos, ensure_ascii=False).replace("</", "<\\/")
     if os.path.dirname(archivo):
         os.makedirs(os.path.dirname(archivo), exist_ok=True)
     with open(archivo, "w", encoding="utf-8") as f:
         f.write(PLANTILLA.replace("/*__DATOS__*/null", js))
-    print(f"Listo: {os.path.abspath(archivo)}  ({len(pelis)} películas, {len(datos_dias)} días)")
+    print(f"Listo: {os.path.abspath(archivo)}  ({len(pelis)} películas, "
+          f"{len(datos['progs'])} programas más, {len(datos_dias)} días)")
     print("Para verla en el celular (misma red WiFi):")
     print("  python3 -m http.server 8000")
     print("  y en el celular abrí  http://<IP de tu PC>:8000/" + os.path.basename(archivo))
@@ -442,7 +550,7 @@ PLANTILLA = r'''<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0e0d12">
-<title>Pelis en la tele</title>
+<title>En la tele</title>
 <style>
 :root{
   --bg:#0e0d12; --panel:#17161d; --panel2:#201f28; --line:#2c2a36;
@@ -461,6 +569,28 @@ header{position:sticky;top:0;z-index:5;background:rgba(14,13,18,.92);backdrop-fi
 .top h1{font-size:21px;font-weight:800;letter-spacing:-.02em}
 .top h1 span{color:var(--acento)}
 .top small{color:var(--dim);font-size:12px}
+.secs{display:flex;gap:4px;overflow-x:auto;padding:0 12px 8px;scrollbar-width:none}
+.secs::-webkit-scrollbar{display:none}
+.sec{flex:0 0 auto;border:0;background:none;padding:6px 10px;font-size:14px;font-weight:700;color:var(--dim);
+  border-bottom:2px solid transparent;cursor:pointer}
+.sec.on{color:var(--txt);border-bottom-color:var(--acento)}
+.oculto{display:none!important}
+.grupo{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin:8px 0 -4px}
+.grupo.vivo-t{color:var(--vivo)}
+.prog-row{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px;cursor:pointer;position:relative;overflow:hidden}
+.prog-row.fin{opacity:.45}
+.pr-top{display:flex;gap:12px;align-items:center}
+.pr-h{min-width:46px;font-weight:800;font-size:15px;font-variant-numeric:tabular-nums;line-height:1.15}
+.pr-h small{display:block;font-weight:500;font-size:11px;color:var(--dim)}
+.pr-img{width:64px;height:40px;border-radius:7px;object-fit:cover;flex:0 0 auto;background:var(--panel2)}
+.pr-main{flex:1;min-width:0}
+.pr-main b{display:block;font-size:14.5px;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pr-meta{font-size:12px;color:var(--sub);display:flex;gap:6px;align-items:center;margin-top:3px;flex-wrap:wrap}
+.pr-meta .p{font-weight:800;font-size:11px;padding:1px 5px;border-radius:5px;color:#14120a}
+.pr-vivo{font-size:10px;font-weight:800;color:#fff;background:var(--vivo);border-radius:4px;padding:1px 5px;letter-spacing:.05em}
+.pr-det{display:none;margin-top:8px;font-size:13px;color:var(--sub)}
+.prog-row.abierta .pr-det{display:block}
+.prog-row .prog{top:auto}
 .dias{display:flex;gap:8px;overflow-x:auto;padding:4px 16px 10px;scrollbar-width:none}
 .dias::-webkit-scrollbar{display:none}
 .dia{flex:0 0 auto;border:1px solid var(--line);background:var(--panel);border-radius:12px;padding:6px 12px;
@@ -532,19 +662,20 @@ main{display:flex;flex-direction:column;gap:14px;padding:6px 16px}
 .hueco::before,.hueco::after{content:"";flex:1;border-top:1px dashed var(--line)}
 .vacio{text-align:center;color:var(--dim);padding:50px 20px}
 .nota{text-align:center;color:var(--dim);font-size:11px;padding:20px 16px 0}
-@media (min-width:720px){main{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));max-width:1200px;margin:0 auto}
+@media (min-width:720px){.grupo{grid-column:1/-1}main{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));max-width:1200px;margin:0 auto}
   .hueco{grid-column:1/-1}}
 </style>
 </head>
 <body>
 <header>
-  <div class="top"><h1>Pelis en la <span>tele</span></h1><small id="gen"></small></div>
+  <div class="top"><h1>En la <span>tele</span></h1><small id="gen"></small></div>
+  <nav class="secs" id="secs"></nav>
   <nav class="dias" id="dias"></nav>
   <div class="barra">
-    <div class="seg" id="vista">
+    <div class="seg solo-pelis" id="vista">
       <button data-v="todas">Todas</button><button data-v="rutina">Rutina</button>
     </div>
-    <select id="orden" aria-label="Ordenar">
+    <select id="orden" class="solo-pelis" aria-label="Ordenar">
       <option value="puntaje">Mejor puntaje</option>
       <option value="hora">Por horario</option>
       <option value="canal">Por canal</option>
@@ -552,9 +683,9 @@ main{display:flex;flex-direction:column;gap:14px;padding:6px 16px}
     <button class="filtro-btn" id="fbtn">Filtros</button>
   </div>
   <div class="filtros" id="filtros">
-    <div class="fila"><label for="min">Puntaje mínimo</label><input type="range" id="min" min="0" max="9" step="0.5"><output id="minv"></output></div>
+    <div class="fila solo-pelis"><label for="min">Puntaje mínimo</label><input type="range" id="min" min="0" max="9" step="0.5"><output id="minv"></output></div>
     <div class="fila">
-      <label class="check"><input type="checkbox" id="sinp"> Incluir sin puntaje</label>
+      <label class="check solo-pelis"><input type="checkbox" id="sinp"> Incluir sin puntaje</label>
       <label class="check"><input type="checkbox" id="term"> Mostrar terminadas</label>
     </div>
     <div class="canales" id="canales"></div>
@@ -562,7 +693,7 @@ main{display:flex;flex-direction:column;gap:14px;padding:6px 16px}
 </header>
 <div class="cuenta" id="cuenta"></div>
 <main id="lista"></main>
-<p class="nota">Horarios de mi.tv · Puntajes de IMDb (vía mi.tv) y TMDB</p>
+<p class="nota">Horarios de mi.tv · Puntajes de IMDb (vía mi.tv) y TMDB · Tocá un programa para ver de qué trata</p>
 
 <script>
 const D = /*__DATOS__*/null;
@@ -572,10 +703,13 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt
 const hhmm = d => d.toLocaleTimeString("es-AR", {hour:"2-digit", minute:"2-digit", hour12:false});
 const pelis = D.pelis.map((p, i) => ({...p, i, ini:new Date(p.ini), fin:new Date(p.fin)}));
 const abiertos = new Set();   // lo que el usuario desplegó (sobrevive al redibujado)
-const canales = [...new Set(pelis.map(p => p.canal))].sort();
+const progs = (D.progs || []).map((p, i) => ({...p, i, ini:new Date(p.ini), fin:new Date(p.fin)}));
+const SECS = [["pelis", "Películas"], ["series", "Series"], ["deportes", "Deportes"], ["noticias", "Noticias"], ["aire", "Aire"]]
+  .filter(([k]) => k === "pelis" || progs.some(p => p.s === k));
+const canalesDe = sec => [...new Set((sec === "pelis" ? pelis : progs.filter(p => p.s === sec)).map(p => p.canal))].sort();
 
 // --- estado (se recuerda en el teléfono) ---
-const def = {vista:"todas", orden:"puntaje", min:6, sinp:false, term:false, apagados:[]};
+const def = {seccion:"pelis", vista:"todas", orden:"puntaje", min:6, sinp:false, term:false, apagados:[]};
 let est = {...def};
 try { Object.assign(est, JSON.parse(localStorage.getItem("pelis-est") || "{}")); } catch(e) {}
 const guardar = () => { try { localStorage.setItem("pelis-est", JSON.stringify(est)); } catch(e) {} };
@@ -583,6 +717,9 @@ const hoyISO = (() => { const d = new Date(Date.now() - 5*3600e3); return d.toLo
 est.dia = D.dias.some(d => d.fecha === hoyISO) ? hoyISO : D.dias[0]?.fecha;
 
 $("#gen").textContent = "Actualizado " + D.generado;
+if (!SECS.some(([k]) => k === est.seccion)) est.seccion = "pelis";
+$("#secs").innerHTML = SECS.map(([k, n]) => `<button class="sec" data-s="${k}">${n}</button>`).join("");
+$("#secs").onclick = e => { const b = e.target.closest(".sec"); if (b) { est.seccion = b.dataset.s; guardar(); pintar(); scrollTo({top:0}); } };
 
 // --- controles ---
 $("#dias").innerHTML = D.dias.map(d =>
@@ -594,7 +731,6 @@ $("#fbtn").onclick = () => $("#filtros").classList.toggle("abierto");
 $("#min").oninput = e => { est.min = +e.target.value; guardar(); pintar(); };
 $("#sinp").onchange = e => { est.sinp = e.target.checked; guardar(); pintar(); };
 $("#term").onchange = e => { est.term = e.target.checked; guardar(); pintar(); };
-$("#canales").innerHTML = canales.map(c => `<button class="canal-chip" data-c="${esc(c)}">${esc(c)}</button>`).join("");
 $("#canales").onclick = e => {
   const b = e.target.closest(".canal-chip"); if (!b) return;
   const c = b.dataset.c, i = est.apagados.indexOf(c);
@@ -646,6 +782,36 @@ function tarjeta(p, ahora, conAlts = false) {
   </article>`;
 }
 
+function fila(p, ahora) {
+  const vivo = p.ini <= ahora && ahora < p.fin, termino = p.fin <= ahora, k = "p" + p.i;
+  const avance = vivo ? Math.round((ahora - p.ini) / (p.fin - p.ini) * 100) : 0;
+  const sub = p.sub && p.sub !== p.titulo ? `<span>${esc(p.sub)}</span>` : "";
+  return `<div class="prog-row${termino ? " fin" : ""}${abiertos.has(k) ? " abierta" : ""}" data-k="${k}">
+    <div class="pr-top">
+      <div class="pr-h">${hhmm(p.ini)}<small>${hhmm(p.fin)}</small></div>
+      ${p.img ? `<img class="pr-img" loading="lazy" src="${esc(p.img)}" alt="" onerror="this.remove()">` : ""}
+      <div class="pr-main"><b>${esc(p.titulo)}</b>
+        <div class="pr-meta">${vivo ? '<span class="pr-vivo">EN VIVO</span>' : ""}<span class="canal-tag">${esc(p.canal)}</span>
+          ${p.puntaje != null ? `<span class="p ${nivel(p)}">${p.puntaje.toFixed(1)}</span>` : ""}${sub}</div>
+      </div>
+    </div>
+    <div class="pr-det">${esc(p.sinopsis || "Sin descripción disponible.")}</div>
+    ${vivo ? `<div class="prog"><i style="width:${avance}%"></i></div>` : ""}
+  </div>`;
+}
+
+function pintarSeccion(ahora) {
+  const lista = progs.filter(p => p.s === est.seccion && p.dia === est.dia &&
+    !est.apagados.includes(p.canal) && (est.term || p.fin > ahora));
+  const vivos = lista.filter(p => p.ini <= ahora && ahora < p.fin);
+  const resto = lista.filter(p => !(p.ini <= ahora && ahora < p.fin));
+  let html = "";
+  if (vivos.length) html += `<div class="grupo vivo-t">● Ahora en vivo</div>` + vivos.map(p => fila(p, ahora)).join("");
+  if (resto.length) html += `<div class="grupo">${vivos.length ? "Más tarde" : "Programación"}</div>` + resto.map(p => fila(p, ahora)).join("");
+  $("#cuenta").textContent = `${lista.length} programas`;
+  $("#lista").innerHTML = html || `<div class="vacio">No hay programas con estos filtros.</div>`;
+}
+
 function duracion(ms) {
   const m = Math.round(ms / 60000), h = Math.floor(m / 60);
   return h ? `${h} h ${String(m % 60).padStart(2, "0")} min` : `${m} min`;
@@ -653,14 +819,20 @@ function duracion(ms) {
 
 function pintar() {
   const ahora = new Date();
+  const enPelis = est.seccion === "pelis";
+  document.querySelectorAll(".sec").forEach(b => b.classList.toggle("on", b.dataset.s === est.seccion));
+  document.querySelectorAll(".solo-pelis").forEach(el => el.classList.toggle("oculto", !enPelis));
+  $("#canales").innerHTML = canalesDe(est.seccion).map(c => `<button class="canal-chip" data-c="${esc(c)}">${esc(c)}</button>`).join("");
   document.querySelectorAll(".dia").forEach(b => b.classList.toggle("on", b.dataset.d === est.dia));
   document.querySelectorAll("#vista button").forEach(b => b.classList.toggle("on", b.dataset.v === est.vista));
   document.querySelectorAll(".canal-chip").forEach(b => b.classList.toggle("on", !est.apagados.includes(b.dataset.c)));
   $("#orden").value = est.orden; $("#min").value = est.min; $("#minv").textContent = est.min.toFixed(1);
   $("#sinp").checked = est.sinp; $("#term").checked = est.term;
-  const filtrando = est.min > 0 || est.apagados.length || !est.sinp;
+  const filtrando = enPelis ? (est.min > 0 || est.apagados.length || !est.sinp)
+                            : canalesDe(est.seccion).some(c => est.apagados.includes(c));
   $("#fbtn").classList.toggle("on", filtrando);
   $("#orden").disabled = est.vista === "rutina";
+  if (!enPelis) return pintarSeccion(ahora);
 
   let lista = pelis.filter(p => p.dia === est.dia);
   let html = "";
@@ -689,7 +861,7 @@ function pintar() {
 }
 
 $("#lista").addEventListener("click", e => {
-  const el = e.target.closest(".alt-item") || e.target.closest(".sin");
+  const el = e.target.closest(".alt-item") || e.target.closest(".sin") || e.target.closest(".prog-row");
   if (!el) return;
   const k = el.dataset.k;
   el.classList.toggle("abierta") ? abiertos.add(k) : abiertos.delete(k);
