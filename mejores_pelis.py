@@ -636,6 +636,7 @@ PLANTILLA = r'''<!doctype html>
 <title>Mejores películas hoy en la tele · Argentina</title>
 <meta name="description" content="__DESCRIPCION__">
 <meta name="robots" content="index, follow">
+<meta name="google-site-verification" content="zWY0yYQ3Sffo5s9Qh1Kvj_JyFVqniKg8wFV_vxoggTM">
 __CANONICAL__
 <meta property="og:type" content="website">
 <meta property="og:locale" content="es_AR">
