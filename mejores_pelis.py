@@ -5,7 +5,7 @@ mejores_pelis.py - Las mejores películas del día en la TV (datos de mi.tv)
 Descarga la programación de los canales que elijas, se queda con las películas,
 completa el puntaje de las que no lo traen (opcional, con TMDB) y te muestra:
   1) el ranking de las mejores del día
-  2) una "rutina" de películas
+  2) una "rutina" de películas que no se pisan entre sí
 
 Uso:
     python3 mejores_pelis.py              # hoy
@@ -53,7 +53,7 @@ CANALES = {
     "amc": "AMC",
     "warner-channel": "Warner",
     "sony": "Sony",
-    #"hbo": "HBO",
+    # "hbo": "HBO",          # descomentá si algún día lo tenés
     "tcm": "TCM",
     "paramount-channel": "Paramount",
     "studio-universal": "Studio Universal",
@@ -517,8 +517,13 @@ main{display:flex;flex-direction:column;gap:14px;padding:6px 16px}
 .sin.abierta{-webkit-line-clamp:unset}
 .alts{border-top:1px solid var(--line);padding:8px 14px 10px;background:rgba(255,255,255,.015)}
 .alts h4{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;font-weight:600;margin-bottom:6px}
-.alt{display:flex;align-items:center;gap:10px;padding:5px 0;font-size:13px}
-.alt + .alt{border-top:1px solid rgba(255,255,255,.04)}
+.alt-item + .alt-item{border-top:1px solid rgba(255,255,255,.04)}
+.alt{display:flex;align-items:center;gap:10px;padding:7px 0;font-size:13px;cursor:pointer}
+.alt::after{content:"›";color:var(--dim);font-size:18px;line-height:1;transition:transform .15s}
+.alt-item.abierta .alt::after{transform:rotate(90deg)}
+.alt-det{display:none;padding:0 0 10px 52px;font-size:13px;color:var(--sub)}
+.alt-item.abierta .alt-det{display:block}
+.alt-det .m{color:var(--dim);font-size:12px;margin-bottom:4px}
 .alt .h{font-weight:700;min-width:42px;font-variant-numeric:tabular-nums}
 .alt .p{font-weight:800;font-size:12px;padding:2px 6px;border-radius:6px;color:#14120a}
 .alt .t{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -565,7 +570,8 @@ const D = /*__DATOS__*/null;
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const hhmm = d => d.toLocaleTimeString("es-AR", {hour:"2-digit", minute:"2-digit", hour12:false});
-const pelis = D.pelis.map(p => ({...p, ini:new Date(p.ini), fin:new Date(p.fin)}));
+const pelis = D.pelis.map((p, i) => ({...p, i, ini:new Date(p.ini), fin:new Date(p.fin)}));
+const abiertos = new Set();   // lo que el usuario desplegó (sobrevive al redibujado)
 const canales = [...new Set(pelis.map(p => p.canal))].sort();
 
 // --- estado (se recuerda en el teléfono) ---
@@ -624,12 +630,18 @@ function tarjeta(p, ahora, conAlts = false) {
       <h3>${esc(p.titulo)} ${p.anio ? `<small>(${p.anio})</small>` : ""}</h3>
       <div class="meta"><span class="canal-tag">${esc(p.canal)}</span>${p.genero ? `<span>${esc(p.genero)}</span>` : ""}
         ${p.ini.toDateString() !== new Date(est.dia + "T12:00").toDateString() ? `<span>· ${p.ini.toLocaleDateString("es-AR",{weekday:"short", day:"numeric"})}</span>` : ""}</div>
-      ${p.sinopsis ? `<p class="sin">${esc(p.sinopsis)}</p>` : ""}
+      ${p.sinopsis ? `<p class="sin${abiertos.has("s" + p.i) ? " abierta" : ""}" data-k="s${p.i}">${esc(p.sinopsis)}</p>` : ""}
     </div>
     ${conAlts && p.alts.length ? `<div class="alts"><h4>También a esta hora</h4>${p.alts.map(i => {
       const a = pelis[i];
-      return `<div class="alt"><span class="h">${hhmm(a.ini)}</span><span class="p ${nivel(a)}">${a.puntaje.toFixed(1)}</span>
-        <span class="t">${esc(a.titulo)}</span><span class="c">${esc(a.canal)}</span></div>`;
+      const k = "a" + p.i + "-" + a.i;
+      const extra = [a.genero, a.anio, `${hhmm(a.ini)} → ${hhmm(a.fin)}`].filter(Boolean).join(" · ");
+      return `<div class="alt-item${abiertos.has(k) ? " abierta" : ""}" data-k="${k}">
+        <div class="alt"><span class="h">${hhmm(a.ini)}</span><span class="p ${nivel(a)}">${a.puntaje.toFixed(1)}</span>
+          <span class="t">${esc(a.titulo)}</span><span class="c">${esc(a.canal)}</span></div>
+        <div class="alt-det"><div class="m">${esc(extra)}${a.fuente === "TMDB" ? " · puntaje TMDB" : ""}</div>
+          ${esc(a.sinopsis || "Sin descripción disponible.")}</div>
+      </div>`;
     }).join("")}</div>` : ""}
   </article>`;
 }
@@ -676,7 +688,12 @@ function pintar() {
   $("#lista").innerHTML = html || `<div class="vacio">No hay películas con estos filtros.</div>`;
 }
 
-$("#lista").addEventListener("click", e => { const s = e.target.closest(".sin"); if (s) s.classList.toggle("abierta"); });
+$("#lista").addEventListener("click", e => {
+  const el = e.target.closest(".alt-item") || e.target.closest(".sin");
+  if (!el) return;
+  const k = el.dataset.k;
+  el.classList.toggle("abierta") ? abiertos.add(k) : abiertos.delete(k);
+});
 pintar();
 setInterval(pintar, 60000);   // actualiza "EN VIVO" y la barra de avance
 </script>
