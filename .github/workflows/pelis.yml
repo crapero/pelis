@@ -1,0 +1,64 @@
+# Actualiza la página de películas automáticamente y la publica en GitHub Pages.
+# Va en el repositorio como:  .github/workflows/pelis.yml
+
+name: Actualizar pelis
+
+on:
+  schedule:
+    # Horario en UTC: 09:00 y 21:00 UTC = 06:00 y 18:00 en Argentina
+    - cron: "0 9,21 * * *"
+  workflow_dispatch:   # permite correrlo a mano con un botón desde la pestaña Actions
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  generar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bajar el código del repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar librerías
+        run: pip install requests beautifulsoup4
+
+      - name: Recuperar puntajes ya consultados a TMDB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/mejores_pelis_tmdb_v3.json
+          key: tmdb-${{ github.run_id }}
+          restore-keys: tmdb-
+
+      - name: Generar la página
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: |
+          mkdir -p sitio
+          python mejores_pelis.py --dias 7 --html sitio/index.html
+
+      - name: Preparar la página para publicar
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: sitio
+
+  publicar:
+    needs: generar
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Publicar en GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
