@@ -124,7 +124,7 @@ SECCIONES = {
 
 # Dirección pública de la página (para Google: enlace canónico, sitemap.xml y robots.txt).
 # Dejalo vacío ("") si la usás solo en tu casa.
-SITIO_URL = "https://perreo404.github.io/pelis/"
+SITIO_URL = "https://crapero.github.io/pelis/"
 
 PAIS = "ar"
 ZONA = ZoneInfo("America/Argentina/Cordoba")
@@ -525,37 +525,20 @@ def bajar(canales, dias):
 
 def generar_html(pelis, dias, ahora, archivo, secciones=None):
     """Arma una página para el celular con TODAS las pelis; los filtros se manejan ahí."""
-    en_rutina, alts_de = set(), {}
-    indice = {id(p): i for i, p in enumerate(pelis)}
-    datos_dias = []
-    for dia in dias:
-        del_dia = [p for p in pelis if max(dia_tv(p), dias[0]) == dia]
-        if not del_dia:
-            continue
-        nombre = "Hoy" if dia == ahora.date() else NOMBRES_DIA[dia.weekday()][:3]
-        datos_dias.append({"fecha": dia.isoformat(), "corto": nombre, "num": f"{dia:%d/%m}"})
-        vigentes = [p for p in del_dia if p["fin"] > ahora]
-        rutina = armar_rutina(vigentes)
-        for r, lista in alternativas(rutina, vigentes).items():
-            alts_de[r] = [indice[id(a)] for a in lista]
-        for p in rutina:
-            en_rutina.add(id(p))
     datos = {
         "generado": f"{ahora:%d/%m %H:%M}",
         "minRutina": PUNTAJE_MINIMO_RUTINA,
-        "dias": datos_dias,
+        "minAlt": PUNTAJE_MINIMO_ALTERNATIVA,
         "pelis": [{
             "titulo": p["titulo"], "anio": p["anio"], "genero": p["genero"], "canal": p["canal"],
             "ini": p["inicio"].isoformat(), "fin": p["fin"].isoformat(),
             "puntaje": p["puntaje"], "fuente": p["fuente"], "img": p["img"],
-            "sinopsis": p["sinopsis"], "dia": max(dia_tv(p), dias[0]).isoformat(),
-            "rutina": id(p) in en_rutina, "alts": alts_de.get(id(p), []),
+            "sinopsis": p["sinopsis"],
         } for p in pelis],
         "progs": [{
             "s": nombre, "titulo": p["titulo"], "sub": p["sub"], "canal": p["canal"],
             "ini": p["inicio"].isoformat(), "fin": p["fin"].isoformat(),
             "puntaje": p["puntaje"], "img": p["img"], "sinopsis": p["sinopsis"],
-            "dia": max(dia_tv(p), dias[0]).isoformat(),
         } for nombre, lista in (secciones or {}).items()
           for p in sorted(lista, key=lambda p: p["inicio"])],
     }
@@ -574,7 +557,7 @@ def generar_html(pelis, dias, ahora, archivo, secciones=None):
                     f"  <url><loc>{SITIO_URL}</loc><lastmod>{ahora:%Y-%m-%d}</lastmod>"
                     "<changefreq>daily</changefreq></url>\n</urlset>\n")
     print(f"Listo: {os.path.abspath(archivo)}  ({len(pelis)} películas, "
-          f"{len(datos['progs'])} programas más, {len(datos_dias)} días)")
+          f"{len(datos['progs'])} programas más, {len(dias)} días)")
     print("Para verla en el celular (misma red WiFi):")
     print("  python3 -m http.server 8000")
     print("  y en el celular abrí  http://<IP de tu PC>:8000/" + os.path.basename(archivo))
@@ -783,7 +766,6 @@ main{display:flex;flex-direction:column;gap:14px;padding:6px 16px}
   <div class="filtros" id="filtros">
     <div class="fila solo-pelis"><label for="min">Puntaje mínimo</label><input type="range" id="min" min="0" max="9" step="0.5"><output id="minv"></output></div>
     <div class="fila">
-      <label class="check solo-pelis"><input type="checkbox" id="sinp"> Incluir sin puntaje</label>
       <label class="check"><input type="checkbox" id="term"> Mostrar terminadas</label>
     </div>
     <div class="canales" id="canales"></div>
@@ -817,12 +799,38 @@ const SECS = [["pelis", "Películas"], ["series", "Series"], ["deportes", "Depor
 const canalesDe = sec => [...new Set((sec === "pelis" ? pelis : progs.filter(p => p.s === sec)).map(p => p.canal))].sort();
 
 // --- estado (se recuerda en el teléfono) ---
-const def = {seccion:"pelis", vista:"todas", orden:"puntaje", min:6, sinp:false, term:false, apagados:[]};
+const def = {seccion:"pelis", vista:"todas", orden:"puntaje", min:6, term:false, apagados:[]};
 let est = {...def};
 try { Object.assign(est, JSON.parse(localStorage.getItem("pelis-est") || "{}")); } catch(e) {}
 const guardar = () => { try { localStorage.setItem("pelis-est", JSON.stringify(est)); } catch(e) {} };
-const hoyISO = (() => { const d = new Date(Date.now() - 5*3600e3); return d.toLocaleDateString("en-CA", {timeZone:"America/Argentina/Cordoba"}); })();
-est.dia = D.dias.some(d => d.fecha === hoyISO) ? hoyISO : D.dias[0]?.fecha;
+delete est.sinp;
+
+// --- días: se calculan con el reloj del teléfono, no con la hora en que se generó la página ---
+const TZ = "America/Argentina/Buenos_Aires";
+const fechaAR = d => d.toLocaleDateString("en-CA", {timeZone: TZ});           // "2026-10-26"
+const iniDia = iso => new Date(iso + "T00:00:00-03:00");
+const finDia = iso => new Date(iniDia(iso).getTime() + 864e5);
+// Un día de tele va de las 00:00 hasta las 05:00 del día siguiente: la trasnoche aparece
+// en los dos días, y lo que ya está al aire a la mañana aparece en el día de hoy.
+const enDia = (p, iso) => p.ini < new Date(finDia(iso).getTime() + 5 * 36e5) && p.fin > iniDia(iso);
+const ultimaFecha = [...pelis, ...progs].reduce((m, p) => { const f = fechaAR(p.ini); return f > m ? f : m; }, "");
+const DIAS_CORTOS = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
+function listaDias() {
+  const hoy = fechaAR(new Date()), dias = [];
+  for (let f = hoy < ultimaFecha ? hoy : ultimaFecha; f <= ultimaFecha; f = fechaAR(new Date(finDia(f).getTime() + 36e5))) {
+    const d = iniDia(f);
+    dias.push({fecha: f, corto: f === hoy ? "Hoy" : DIAS_CORTOS[new Date(f + "T12:00:00-03:00").getUTCDay()],
+               num: f.slice(8, 10) + "/" + f.slice(5, 7)});
+  }
+  return dias;
+}
+let diasHtml = "";
+function pintarDias() {
+  const dias = listaDias();
+  if (!dias.some(d => d.fecha === est.dia)) est.dia = dias[0]?.fecha;   // si pasó la medianoche, saltar a hoy
+  const html = dias.map(d => `<button class="dia" data-d="${d.fecha}"><b>${esc(d.corto)}</b><span>${esc(d.num)}</span></button>`).join("");
+  if (html !== diasHtml) { $("#dias").innerHTML = diasHtml = html; }
+}
 
 $("#gen").textContent = "Actualizado " + D.generado;
 if (!SECS.some(([k]) => k === est.seccion)) est.seccion = "pelis";
@@ -830,14 +838,11 @@ $("#secs").innerHTML = SECS.map(([k, n]) => `<button class="sec" data-s="${k}">$
 $("#secs").onclick = e => { const b = e.target.closest(".sec"); if (b) { est.seccion = b.dataset.s; guardar(); pintar(); scrollTo({top:0}); } };
 
 // --- controles ---
-$("#dias").innerHTML = D.dias.map(d =>
-  `<button class="dia" data-d="${d.fecha}"><b>${esc(d.corto)}</b><span>${esc(d.num)}</span></button>`).join("");
 $("#dias").onclick = e => { const b = e.target.closest(".dia"); if (b) { est.dia = b.dataset.d; pintar(); scrollTo({top:0}); } };
 $("#vista").onclick = e => { const b = e.target.closest("button"); if (b) { est.vista = b.dataset.v; guardar(); pintar(); } };
 $("#orden").onchange = e => { est.orden = e.target.value; guardar(); pintar(); };
 $("#fbtn").onclick = () => $("#filtros").classList.toggle("abierto");
 $("#min").oninput = e => { est.min = +e.target.value; guardar(); pintar(); };
-$("#sinp").onchange = e => { est.sinp = e.target.checked; guardar(); pintar(); };
 $("#term").onchange = e => { est.term = e.target.checked; guardar(); pintar(); };
 $("#canales").onclick = e => {
   const b = e.target.closest(".canal-chip"); if (!b) return;
@@ -845,6 +850,38 @@ $("#canales").onclick = e => {
   i >= 0 ? est.apagados.splice(i, 1) : est.apagados.push(c);
   guardar(); pintar();
 };
+
+// --- rutina: se recalcula en el momento, con la hora actual ---
+function armarRutina(lista) {
+  // elige pelis que no se pisen maximizando la suma de (puntaje - 6)^2
+  const c = lista.filter(p => p.puntaje != null && p.puntaje >= D.minRutina).sort((a, b) => a.fin - b.fin);
+  const n = c.length, mejor = new Array(n + 1).fill(0), prev = new Array(n + 1).fill(null);
+  for (let i = 1; i <= n; i++) {
+    let j = i - 1;
+    while (j > 0 && c[j - 1].fin > c[i - 1].ini) j--;
+    const con = mejor[j] + (c[i - 1].puntaje - 6) ** 2;
+    if (con > mejor[i - 1]) { mejor[i] = con; prev[i] = j; } else mejor[i] = mejor[i - 1];
+  }
+  const r = [];
+  for (let i = n; i > 0;) {
+    if (prev[i] !== null && mejor[i] !== mejor[i - 1]) { r.push(c[i - 1]); i = prev[i]; } else i--;
+  }
+  return r.reverse();
+}
+function alternativas(rutina, lista) {
+  const alts = new Map(rutina.map(r => [r, []])), elegidas = new Set(rutina);
+  for (const p of lista) {
+    if (elegidas.has(p) || p.puntaje == null || p.puntaje < D.minAlt) continue;
+    let mejor = null, solape = 0;
+    for (const r of rutina) {
+      const comun = Math.min(p.fin, r.fin) - Math.max(p.ini, r.ini);
+      if (comun > solape) { mejor = r; solape = comun; }
+    }
+    if (mejor) alts.get(mejor).push(p);
+  }
+  for (const l of alts.values()) l.sort((a, b) => a.ini - b.ini);
+  return alts;
+}
 
 function fondo(canal) {   // color propio para cada canal cuando no hay imagen
   let h = 0; for (const c of canal) h = (h * 31 + c.charCodeAt(0)) % 360;
@@ -856,7 +893,7 @@ function nivel(p) {
   return p.puntaje >= 8 ? "n8" : p.puntaje >= 7 ? "n7" : p.puntaje >= 6 ? "n6" : "n0";
 }
 
-function tarjeta(p, ahora, conAlts = false) {
+function tarjeta(p, ahora, alts = null) {
   const vivo = p.ini <= ahora && ahora < p.fin, termino = p.fin <= ahora;
   const avance = vivo ? Math.round((ahora - p.ini) / (p.fin - p.ini) * 100) : 0;
   const pts = p.puntaje == null ? "?" : p.puntaje.toFixed(1);
@@ -873,11 +910,10 @@ function tarjeta(p, ahora, conAlts = false) {
     <div class="info">
       <h3>${esc(p.titulo)} ${p.anio ? `<small>(${p.anio})</small>` : ""}</h3>
       <div class="meta"><span class="canal-tag">${esc(p.canal)}</span>${p.genero ? `<span>${esc(p.genero)}</span>` : ""}
-        ${p.ini.toDateString() !== new Date(est.dia + "T12:00").toDateString() ? `<span>· ${p.ini.toLocaleDateString("es-AR",{weekday:"short", day:"numeric"})}</span>` : ""}</div>
+        ${fechaAR(p.ini) !== est.dia ? `<span>· ${p.ini.toLocaleDateString("es-AR",{weekday:"short", day:"numeric", timeZone: TZ})}</span>` : ""}</div>
       ${p.sinopsis ? `<p class="sin${abiertos.has("s" + p.i) ? " abierta" : ""}" data-k="s${p.i}">${esc(p.sinopsis)}</p>` : ""}
     </div>
-    ${conAlts && p.alts.length ? `<div class="alts"><h4>También a esta hora</h4>${p.alts.map(i => {
-      const a = pelis[i];
+    ${alts && alts.length ? `<div class="alts"><h4>También a esta hora</h4>${alts.map(a => {
       const k = "a" + p.i + "-" + a.i;
       const extra = [a.genero, a.anio, `${hhmm(a.ini)} → ${hhmm(a.fin)}`].filter(Boolean).join(" · ");
       return `<div class="alt-item${abiertos.has(k) ? " abierta" : ""}" data-k="${k}">
@@ -909,7 +945,7 @@ function fila(p, ahora) {
 }
 
 function pintarSeccion(ahora) {
-  const lista = progs.filter(p => p.s === est.seccion && p.dia === est.dia &&
+  const lista = progs.filter(p => p.s === est.seccion && enDia(p, est.dia) &&
     !est.apagados.includes(p.canal) && (est.term || p.fin > ahora));
   const vivos = lista.filter(p => p.ini <= ahora && ahora < p.fin);
   const resto = lista.filter(p => !(p.ini <= ahora && ahora < p.fin));
@@ -927,6 +963,7 @@ function duracion(ms) {
 
 function pintar() {
   const ahora = new Date();
+  pintarDias();
   const enPelis = est.seccion === "pelis";
   document.querySelectorAll(".sec").forEach(b => b.classList.toggle("on", b.dataset.s === est.seccion));
   document.querySelectorAll(".solo-pelis").forEach(el => el.classList.toggle("oculto", !enPelis));
@@ -935,27 +972,26 @@ function pintar() {
   document.querySelectorAll("#vista button").forEach(b => b.classList.toggle("on", b.dataset.v === est.vista));
   document.querySelectorAll(".canal-chip").forEach(b => b.classList.toggle("on", !est.apagados.includes(b.dataset.c)));
   $("#orden").value = est.orden; $("#min").value = est.min; $("#minv").textContent = est.min.toFixed(1);
-  $("#sinp").checked = est.sinp; $("#term").checked = est.term;
-  const filtrando = enPelis ? (est.min > 0 || est.apagados.length || !est.sinp)
+  $("#term").checked = est.term;
+  const filtrando = enPelis ? (est.min > 0 || est.apagados.length)
                             : canalesDe(est.seccion).some(c => est.apagados.includes(c));
   $("#fbtn").classList.toggle("on", filtrando);
   $("#orden").disabled = est.vista === "rutina";
   if (!enPelis) return pintarSeccion(ahora);
 
-  let lista = pelis.filter(p => p.dia === est.dia);
+  let lista = pelis.filter(p => enDia(p, est.dia) && !est.apagados.includes(p.canal) && (est.term || p.fin > ahora));
   let html = "";
   if (est.vista === "rutina") {
-    lista = lista.filter(p => p.rutina && (est.term || p.fin > ahora)).sort((a, b) => a.ini - b.ini);
+    const base = lista;
+    lista = armarRutina(base);
+    const alts = alternativas(lista, base);
     lista.forEach((p, i) => {
       if (i) { const libre = p.ini - lista[i-1].fin; if (libre >= 10*60e3) html += `<div class="hueco">libre ${duracion(libre)}</div>`; }
-      html += tarjeta(p, ahora, true);
+      html += tarjeta(p, ahora, alts.get(p));
     });
     $("#cuenta").textContent = lista.length ? `Rutina de ${lista.length} películas sin superposiciones (${D.minRutina}+)` : "";
   } else {
-    lista = lista.filter(p =>
-      !est.apagados.includes(p.canal) &&
-      (est.term || p.fin > ahora) &&
-      (p.puntaje == null ? est.sinp : p.puntaje >= est.min));
+    lista = lista.filter(p => p.puntaje == null || p.puntaje >= est.min);   // las sin puntaje siempre se muestran
     const orden = {
       puntaje: (a, b) => (b.puntaje ?? -1) - (a.puntaje ?? -1) || a.ini - b.ini,
       hora: (a, b) => a.ini - b.ini || (b.puntaje ?? -1) - (a.puntaje ?? -1),
@@ -975,7 +1011,7 @@ $("#lista").addEventListener("click", e => {
   el.classList.toggle("abierta") ? abiertos.add(k) : abiertos.delete(k);
 });
 pintar();
-setInterval(pintar, 60000);   // actualiza "EN VIVO" y la barra de avance
+setInterval(pintar, 60000);   // actualiza "EN VIVO", la barra de avance, la rutina y el día de hoy
 </script>
 </body>
 </html>
