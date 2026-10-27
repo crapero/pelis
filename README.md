@@ -5,6 +5,8 @@ de más de 50 canales de Argentina (TNT, Space, Cinecanal, AMC, Star Channel,
 TCM, Warner y más), le pone el puntaje de cada película y te arma una
 **rutina para ver la mayor cantidad de pelis buenas sin que se superpongan**.
 
+🌐 [Abrir la página de películas](https://hediondom.github.io/pelis/)
+
 ## Qué tiene
 - Películas de hoy y de los próximos 7 días, ordenadas por puntaje u horario
 - Rutina sin superposiciones con alternativas a cada hora
