@@ -124,7 +124,7 @@ SECCIONES = {
 
 # Dirección pública de la página (para Google: enlace canónico, sitemap.xml y robots.txt).
 # Dejalo vacío ("") si la usás solo en tu casa.
-SITIO_URL = "https://crapero.github.io/pelis/"
+SITIO_URL = "https://hediondom.github.io/pelis/"
 
 PAIS = "ar"
 ZONA = ZoneInfo("America/Argentina/Cordoba")
