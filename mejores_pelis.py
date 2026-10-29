@@ -8,9 +8,9 @@ completa el puntaje de las que no lo traen (opcional, con TMDB) y te muestra:
   2) una "rutina" de películas que no se pisan entre sí
 
 Uso:
-    python3 mejores_pelis.py              # hoy
-    python3 mejores_pelis.py --manana     # mañana
-    python3 mejores_pelis.py --dias 3     # hoy, mañana y pasado
+    python3 mejores_pelis.py               # hoy
+    python3 mejores_pelis.py --manana      # mañana
+    python3 mejores_pelis.py --dias 3      # hoy, mañana y pasado
     python3 mejores_pelis.py --manana --dias 2   # mañana y pasado
     python3 mejores_pelis.py --dias 7 --html     # página para el celular (pelis.html)
 
@@ -25,11 +25,12 @@ https://www.themoviedb.org/settings/api y antes de correr el script hacé:
 """
 
 import argparse
+from bisect import bisect_right
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 import re
 import sys
-import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -42,8 +43,6 @@ except ImportError:
     sys.exit("Faltan librerías. Instalá con:  sudo apt install python3-requests python3-bs4")
 
 # ---------------------------------------------------------------- CONFIGURACIÓN
-# Canales a revisar: "identificador en mi.tv": "nombre a mostrar".
-# Para agregar uno, abrí su página en mi.tv: la dirección es mi.tv/ar/canales/<identificador>
 CANALES = {
     "tnt": "TNT",
     "fox": "Star Channel",
@@ -60,11 +59,9 @@ CANALES = {
     "fx-movies": "FX Movies",
     "golden": "Golden",
     "i-sat": "I-SAT",
-    # "hbo": "HBO",          # descomentá si algún día lo tenés
+    # "hbo": "HBO",           # descomentá si algún día lo tenés
 }
 
-# Secciones extra de la página (--html): solo se muestran con sus horarios, sin rutina.
-# Las series también se juntan de los canales de películas de arriba.
 SECCIONES = {
     "series": {
         "universal-channel": "Universal TV",
@@ -122,19 +119,18 @@ SECCIONES = {
     },
 }
 
-# Dirección pública de la página (para Google: enlace canónico, sitemap.xml y robots.txt).
-# Dejalo vacío ("") si la usás solo en tu casa.
 SITIO_URL = "https://hediondom.github.io/pelis/"
 
 PAIS = "ar"
 ZONA = ZoneInfo("America/Argentina/Cordoba")
-PUNTAJE_MINIMO_RANKING = 6.0  # en "Mejores películas" solo se muestran las de este puntaje o más
-PUNTAJE_MINIMO_RUTINA = 7.0   # en la rutina solo entran pelis con este puntaje o más
-PUNTAJE_MINIMO_ALTERNATIVA = 7.0  # pelis que se pisan con la rutina y se muestran como alternativa
-TOP = None                    # máximo de pelis en el ranking por día (None = todas)
-DURACION_ULTIMA = 2.0         # horas asumidas para la última peli de cada canal
-AJUSTE_HORAS = 0              # mi.tv da horas UTC y ya se convierten; esto es un ajuste extra
-CORTE_DIA = 5                 # hasta esta hora de la madrugada se cuenta como el día anterior
+PUNTAJE_MINIMO_RANKING = 6.0
+PUNTAJE_MINIMO_RUTINA = 7.0
+PUNTAJE_MINIMO_ALTERNATIVA = 7.0
+TOP = None
+DURACION_ULTIMA = 2.0
+AJUSTE_HORAS = 0
+CORTE_DIA = 5
+MAX_HILOS = 4
 CACHE_TMDB = os.path.expanduser("~/.cache/mejores_pelis_tmdb_v3.json")
 # ------------------------------------------------------------------------------
 
@@ -145,10 +141,11 @@ HEADERS = {
 }
 
 
-def descargar_canal(canal, fecha):
+def descargar_canal(canal, fecha, sesion=None):
     """Devuelve el HTML con la grilla de un canal para una fecha (AAAA-MM-DD)."""
     url = f"https://mi.tv/{PAIS}/async/channel/{canal}/{fecha}/0"
-    r = requests.get(url, headers=HEADERS, timeout=20)
+    cliente = sesion or requests
+    r = cliente.get(url, headers=None if sesion else HEADERS, timeout=20)
     r.raise_for_status()
     return r.text
 
@@ -175,10 +172,13 @@ def leer_grilla(html, canal, fecha, todo=False):
         hora = li.select_one("span.time")
         titulo = li.select_one("h2")
         if not hora or not titulo:
-            continue  # publicidad u otra cosa
-        h, m = map(int, re.findall(r"\d+", hora.text)[:2])
+            continue
+        nums = re.findall(r"\d+", hora.text)
+        if len(nums) < 2:
+            continue
+        h, m = int(nums[0]), int(nums[1])
         inicio = base.replace(hour=h, minute=m) + timedelta(hours=AJUSTE_HORAS)
-        if anterior and inicio < anterior["inicio"]:   # pasó la medianoche
+        if anterior and inicio < anterior["inicio"]:
             inicio += timedelta(days=1)
             base += timedelta(days=1)
         sub = li.select_one("span.sub-title")
@@ -189,7 +189,6 @@ def leer_grilla(html, canal, fecha, todo=False):
         m_anio = re.search(r"-((?:19|20)\d{2})(?:-\d+)?$", href)
         if anio is None and m_anio:
             anio = int(m_anio.group(1))
-        # si el subtítulo no es "Género / Año / Puntaje", suele ser el título original
         original = None
         if "/" not in subtitulo and not re.search(r"episodio|temporada", subtitulo, re.I):
             original, genero = subtitulo or None, ""
@@ -203,7 +202,8 @@ def leer_grilla(html, canal, fecha, todo=False):
             "img": img, "sinopsis": " ".join(sinopsis.text.split()) if sinopsis else "",
             "canal": nombre_canal(canal), "slug": canal, "titulo": titulo.text.strip(), "genero": genero,
             "anio": anio, "puntaje": puntaje, "fuente": "mi.tv" if puntaje else None,
-            "inicio": inicio, "fin": None, "href": href, "sub": subtitulo, "original": original,
+            "inicio": inicio, "fin": None, "fin_asumido": False,
+            "href": href, "sub": subtitulo, "original": original,
         }
         if anterior:
             anterior["fin"] = inicio
@@ -211,7 +211,8 @@ def leer_grilla(html, canal, fecha, todo=False):
         anterior = p
     if anterior:
         anterior["fin"] = anterior["inicio"] + timedelta(hours=DURACION_ULTIMA)
-    for p in programas:   # pasar de UTC a la hora de Argentina
+        anterior["fin_asumido"] = True
+    for p in programas:
         p["inicio"] = p["inicio"].astimezone(ZONA)
         p["fin"] = p["fin"].astimezone(ZONA)
     return programas if todo else [p for p in programas if es_pelicula(p)]
@@ -245,7 +246,7 @@ def es_pelicula(p):
 # ------------------------------------------------------------ puntajes de TMDB
 def cargar_cache():
     try:
-        with open(CACHE_TMDB) as f:
+        with open(CACHE_TMDB, encoding="utf-8") as f:
             return json.load(f)
     except (OSError, ValueError):
         return {}
@@ -253,13 +254,13 @@ def cargar_cache():
 
 def guardar_cache(cache):
     os.makedirs(os.path.dirname(CACHE_TMDB), exist_ok=True)
-    with open(CACHE_TMDB, "w") as f:
+    with open(CACHE_TMDB, "w", encoding="utf-8") as f:
         json.dump(cache, f, ensure_ascii=False, indent=1)
 
 
-def elegir_resultado(resultados, anio):
+def elegir_resultado(resultados, anio, consulta=""):
     """De lo que devuelve TMDB, se queda con la peli del mismo año (±1)
-    que tenga más votos. Así no confunde pelis con nombres parecidos."""
+    que tenga más votos. Si no hay año, prioriza coincidencia exacta de título."""
     buenos = []
     for r in resultados:
         fecha = r.get("release_date") or ""
@@ -267,23 +268,42 @@ def elegir_resultado(resultados, anio):
             continue
         if r.get("vote_count", 0) >= 20:
             buenos.append(r)
-    return max(buenos, key=lambda r: r["vote_count"]) if buenos else None
+    if not buenos:
+        return None
+    if not anio and consulta:
+        c_norm = consulta.strip().lower()
+        exactos = [
+            r for r in buenos
+            if (r.get("title") or "").strip().lower() == c_norm
+            or (r.get("original_title") or "").strip().lower() == c_norm
+        ]
+        if exactos:
+            return max(exactos, key=lambda r: r["vote_count"])
+    return max(buenos, key=lambda r: r["vote_count"])
 
 
-def buscar_tmdb(p, clave):
-    """Busca la peli en TMDB. Devuelve {puntaje, img, sinopsis} o None."""
+def llave_cache_peli(p):
+    return f"{p['titulo']}|{p.get('original') or ''}|{p['anio']}"
+
+
+def buscar_tmdb(p, clave, sesion):
+    """Busca la peli en TMDB. Devuelve {puntaje, img, sinopsis}, None o 'error'."""
     for consulta in filter(None, [p["original"], p["titulo"]]):
         params = {"api_key": clave, "query": consulta, "language": "es-AR"}
         if p["anio"]:
             params["year"] = p["anio"]
         try:
-            r = requests.get("https://api.themoviedb.org/3/search/movie",
-                             params=params, timeout=15)
+            r = sesion.get("https://api.themoviedb.org/3/search/movie",
+                           params=params, timeout=15)
         except requests.RequestException:
             return "error"
         if r.status_code == 401:
-            sys.exit("TMDB rechazó la clave: revisá TMDB_API_KEY (usá la 'API Key' corta).")
-        peli = elegir_resultado(r.json().get("results", []), p["anio"])
+            return "auth_error"
+        try:
+            datos_json = r.json().get("results", [])
+        except ValueError:
+            return "error"
+        peli = elegir_resultado(datos_json, p["anio"], consulta)
         if peli:
             ruta = peli.get("backdrop_path") or peli.get("poster_path")
             return {
@@ -295,8 +315,7 @@ def buscar_tmdb(p, clave):
 
 
 def completar_puntajes(pelis, todas=False):
-    """Completa puntajes (y para la página, imágenes y sinopsis) con TMDB.
-    todas=True consulta todas las pelis, no solo las que no tienen puntaje."""
+    """Completa puntajes (y para la página, imágenes y sinopsis) con TMDB."""
     clave = os.environ.get("TMDB_API_KEY")
     faltan = [p for p in pelis if todas or p["puntaje"] is None]
     if not faltan:
@@ -305,26 +324,49 @@ def completar_puntajes(pelis, todas=False):
         n = sum(p["puntaje"] is None for p in pelis)
         print(f"({n} pelis sin puntaje. Configurá TMDB_API_KEY para completarlas.)\n")
         return
+
     cache = cargar_cache()
-    for k, p in enumerate(faltan, 1):
-        llave = f"{p['titulo']}|{p['anio']}"
-        if llave not in cache:
-            print(f"\rConsultando TMDB... {k}/{len(faltan)}", end="", file=sys.stderr)
-            datos = buscar_tmdb(p, clave)
-            if datos == "error":
-                continue
-            cache[llave] = datos
-        datos = cache[llave]
+    # Deduplicamos las consultas nuevas que aún no están en caché
+    por_consultar = {}
+    for p in faltan:
+        llave = llave_cache_peli(p)
+        key_legacy = f"{p['titulo']}|{p['anio']}"
+        if llave not in cache and key_legacy in cache:
+            cache[llave] = cache[key_legacy]
+        if llave not in cache and llave not in por_consultar:
+            por_consultar[llave] = p
+
+    if por_consultar:
+        total = len(por_consultar)
+        try:
+            with requests.Session() as sesion:
+                with ThreadPoolExecutor(max_workers=MAX_HILOS) as pool:
+                    futuros = {
+                        pool.submit(buscar_tmdb, p, clave, sesion): llave
+                        for llave, p in por_consultar.items()
+                    }
+                    for k, fut in enumerate(as_completed(futuros), 1):
+                        llave = futuros[fut]
+                        print(f"\rConsultando TMDB... {k}/{total}", end="", file=sys.stderr)
+                        datos = fut.result()
+                        if datos == "auth_error":
+                            sys.exit("\nTMDB rechazó la clave: revisá TMDB_API_KEY (usá la 'API Key' corta).")
+                        if datos != "error":
+                            cache[llave] = datos
+        finally:
+            print("\r" + " " * 40 + "\r", end="", file=sys.stderr)
+            guardar_cache(cache)
+
+    for p in faltan:
+        datos = cache.get(llave_cache_peli(p))
         if not datos:
             continue
-        if p["puntaje"] is None and datos["puntaje"]:
+        if p["puntaje"] is None and datos.get("puntaje"):
             p["puntaje"], p["fuente"] = datos["puntaje"], "TMDB"
         if datos.get("img"):
-            p["img"] = datos["img"]          # las de TMDB son mejores que las de mi.tv
+            p["img"] = datos["img"]
         if not p["sinopsis"] and datos.get("sinopsis"):
             p["sinopsis"] = datos["sinopsis"]
-    print("\r" + " " * 40 + "\r", end="", file=sys.stderr)
-    guardar_cache(cache)
 
 
 def completar_series(episodios):
@@ -333,28 +375,42 @@ def completar_series(episodios):
     if not clave or not episodios:
         return
     cache = cargar_cache()
-    titulos = sorted({p["titulo"] for p in episodios})
-    for k, titulo in enumerate(titulos, 1):
-        llave = f"serie|{titulo}"
-        if llave in cache:
-            continue
-        print(f"\rConsultando series en TMDB... {k}/{len(titulos)}", end="", file=sys.stderr)
+    titulos = sorted({p["titulo"] for p in episodios if f"serie|{p['titulo']}" not in cache})
+
+    if titulos:
+        total = len(titulos)
+
+        def buscar_serie(titulo, sesion):
+            try:
+                r = sesion.get("https://api.themoviedb.org/3/search/tv", timeout=15,
+                               params={"api_key": clave, "query": titulo, "language": "es-AR"})
+                res = [x for x in r.json().get("results", []) if x.get("vote_count", 0) >= 20]
+            except (requests.RequestException, ValueError):
+                return "error"
+            if res:
+                s = max(res, key=lambda x: x["vote_count"])
+                ruta = s.get("backdrop_path") or s.get("poster_path")
+                return {
+                    "puntaje": round(s["vote_average"], 1),
+                    "img": f"https://image.tmdb.org/t/p/w300{ruta}" if ruta else None,
+                    "sinopsis": s.get("overview") or "",
+                }
+            return None
+
         try:
-            r = requests.get("https://api.themoviedb.org/3/search/tv", timeout=15,
-                             params={"api_key": clave, "query": titulo, "language": "es-AR"})
-            res = [x for x in r.json().get("results", []) if x.get("vote_count", 0) >= 20]
-        except (requests.RequestException, ValueError):
-            continue
-        if res:
-            s = max(res, key=lambda x: x["vote_count"])
-            ruta = s.get("backdrop_path") or s.get("poster_path")
-            cache[llave] = {"puntaje": round(s["vote_average"], 1),
-                            "img": f"https://image.tmdb.org/t/p/w300{ruta}" if ruta else None,
-                            "sinopsis": s.get("overview") or ""}
-        else:
-            cache[llave] = None
-    print("\r" + " " * 40 + "\r", end="", file=sys.stderr)
-    guardar_cache(cache)
+            with requests.Session() as sesion:
+                with ThreadPoolExecutor(max_workers=MAX_HILOS) as pool:
+                    futuros = {pool.submit(buscar_serie, t, sesion): t for t in titulos}
+                    for k, fut in enumerate(as_completed(futuros), 1):
+                        titulo = futuros[fut]
+                        print(f"\rConsultando series en TMDB... {k}/{total}", end="", file=sys.stderr)
+                        res = fut.result()
+                        if res != "error":
+                            cache[f"serie|{titulo}"] = res
+        finally:
+            print("\r" + " " * 40 + "\r", end="", file=sys.stderr)
+            guardar_cache(cache)
+
     for p in episodios:
         datos = cache.get(f"serie|{p['titulo']}")
         if datos:
@@ -364,19 +420,22 @@ def completar_series(episodios):
 
 
 # ------------------------------------------------------- rutina sin choques
+def clave_prog(p):
+    return (p["slug"], p["inicio"])
+
+
 def armar_rutina(pelis):
     """Elige pelis que no se superpongan maximizando 'cuánto valen' en total.
     Una peli de 8.5 vale mucho más que dos de 7, por eso se usa (puntaje - 6)^2."""
     candidatas = sorted((p for p in pelis if (p["puntaje"] or 0) >= PUNTAJE_MINIMO_RUTINA),
                         key=lambda p: p["fin"])
     n = len(candidatas)
+    fines = [c["fin"] for c in candidatas]
     mejor = [0.0] * (n + 1)
     eleccion = [None] * (n + 1)
     for i in range(1, n + 1):
         p = candidatas[i - 1]
-        j = i - 1   # última peli que termina antes de que empiece esta
-        while j > 0 and candidatas[j - 1]["fin"] > p["inicio"]:
-            j -= 1
+        j = bisect_right(fines, p["inicio"], 0, i - 1)
         con = mejor[j] + (p["puntaje"] - 6) ** 2
         if con > mejor[i - 1]:
             mejor[i], eleccion[i] = con, j
@@ -395,10 +454,10 @@ def armar_rutina(pelis):
 def alternativas(rutina, pelis):
     """Para cada peli de la rutina, las otras buenas que se pisan con ella.
     Cada alternativa va con la peli de la rutina con la que más tiempo comparte."""
-    alts = {id(r): [] for r in rutina}
-    elegidas = {id(r) for r in rutina}
+    alts = {clave_prog(r): [] for r in rutina}
+    elegidas = {clave_prog(r) for r in rutina}
     for p in pelis:
-        if id(p) in elegidas or (p["puntaje"] or 0) < PUNTAJE_MINIMO_ALTERNATIVA:
+        if clave_prog(p) in elegidas or (p["puntaje"] or 0) < PUNTAJE_MINIMO_ALTERNATIVA:
             continue
         mejor, solape = None, timedelta(0)
         for r in rutina:
@@ -406,7 +465,7 @@ def alternativas(rutina, pelis):
             if comun > solape:
                 mejor, solape = r, comun
         if mejor:
-            alts[id(mejor)].append(p)
+            alts[clave_prog(mejor)].append(p)
     for lista in alts.values():
         lista.sort(key=lambda p: p["inicio"])
     return alts
@@ -458,7 +517,7 @@ def main():
         sys.exit("No encontré películas. Puede que mi.tv haya cambiado su página.")
 
     if args.html:
-        completar_puntajes(pelis, todas=True)   # también trae imágenes y sinopsis
+        completar_puntajes(pelis, todas=True)
         extras = bajar([c for sec in SECCIONES.values() for c in sec if c not in CANALES], dias)
         secciones = {
             "series": [p for p in programas + extras if es_episodio(p)
@@ -475,7 +534,6 @@ def main():
     completar_puntajes(pelis)
 
     for dia in dias:
-        # lo de la madrugada de hoy (antes del corte) se muestra junto con hoy
         del_dia = [p for p in pelis if max(dia_tv(p), dias[0]) == dia]
         titulo = f"{NOMBRES_DIA[dia.weekday()]} {dia:%d/%m}"
         if not del_dia:
@@ -484,7 +542,6 @@ def main():
         print(f"\n##### {titulo} #####")
         print(f"--- Mejores películas ({PUNTAJE_MINIMO_RANKING}+) ---")
         ranking = [p for p in del_dia if (p["puntaje"] or 0) >= PUNTAJE_MINIMO_RANKING]
-        # se eligen las mejores (hasta TOP) y se muestran en orden de horario
         ranking = sorted(ranking, key=lambda p: p["puntaje"], reverse=True)[:TOP]
         for p in sorted(ranking, key=lambda p: p["inicio"]):
             print(linea(p))
@@ -493,7 +550,7 @@ def main():
         alts = alternativas(rutina, del_dia)
         for p in rutina:
             print(f"{linea(p)}  -> {p['fin']:%H:%M}")
-            for a in alts[id(p)]:
+            for a in alts[clave_prog(p)]:
                 print(f"      o  {linea(a)}  -> {a['fin']:%H:%M}")
 
     if any(p["fuente"] == "TMDB" for p in pelis):
@@ -501,25 +558,49 @@ def main():
 
 
 def bajar(canales, dias):
-    """Baja la grilla completa de cada canal y cada día. Las grillas se pisan un poco
-    entre días (la de hoy trae la madrugada siguiente), así que se eliminan repetidos."""
-    vistos, programas = set(), []
-    total, n = len(canales) * len(dias), 0
-    for dia in dias:
-        fecha = dia.strftime("%Y-%m-%d")
-        for canal in canales:
-            n += 1
-            print(f"\rBajando programación... {n}/{total}", end="", file=sys.stderr)
-            try:
-                for p in leer_grilla(descargar_canal(canal, fecha), canal, fecha, todo=True):
-                    clave = (canal, p["inicio"])
-                    if clave not in vistos:
-                        vistos.add(clave)
-                        programas.append(p)
-            except requests.RequestException as e:
-                print(f"\nNo pude bajar {nombre_canal(canal)} del {fecha}: {e}", file=sys.stderr)
-            time.sleep(0.5)   # no saturar el sitio
+    """Baja la grilla completa de cada canal y cada día en paralelo.
+    Elimina repetidos en la madrugada y corrige la duración asumida del último programa."""
+    vistos, programas = {}, []
+    tareas = [(canal, dia.strftime("%Y-%m-%d")) for dia in dias for canal in canales]
+    total = len(tareas)
+    if not total:
+        return programas
+
+    with requests.Session() as sesion:
+        sesion.headers.update(HEADERS)
+
+        def fetch(tarea):
+            canal, fecha = tarea
+            return canal, fecha, descargar_canal(canal, fecha, sesion)
+
+        with ThreadPoolExecutor(max_workers=MAX_HILOS) as pool:
+            futuros = {pool.submit(fetch, t): t for t in tareas}
+            resultados = {}
+            for n, fut in enumerate(as_completed(futuros), 1):
+                canal, fecha = futuros[fut]
+                print(f"\rBajando programación... {n}/{total}", end="", file=sys.stderr)
+                try:
+                    _, _, html = fut.result()
+                    resultados[(canal, fecha)] = html
+                except requests.RequestException as e:
+                    print(f"\nNo pude bajar {nombre_canal(canal)} del {fecha}: {e}", file=sys.stderr)
+
     print("\r" + " " * 40 + "\r", end="", file=sys.stderr)
+
+    # Procesamos en orden cronológico de tareas para empalmar las madrugadas correctamente
+    for canal, fecha in tareas:
+        html = resultados.get((canal, fecha))
+        if not html:
+            continue
+        for p in leer_grilla(html, canal, fecha, todo=True):
+            clave = (canal, p["inicio"])
+            if clave not in vistos:
+                vistos[clave] = p
+                programas.append(p)
+            elif vistos[clave].get("fin_asumido") and not p.get("fin_asumido"):
+                vistos[clave]["fin"] = p["fin"]
+                vistos[clave]["fin_asumido"] = False
+
     return programas
 
 
@@ -549,9 +630,9 @@ def generar_html(pelis, dias, ahora, archivo, secciones=None):
         f.write(rellenar_seo(PLANTILLA, pelis, dias, ahora).replace("/*__DATOS__*/null", js))
     if SITIO_URL:
         carpeta = os.path.dirname(archivo) or "."
-        with open(os.path.join(carpeta, "robots.txt"), "w") as f:
+        with open(os.path.join(carpeta, "robots.txt"), "w", encoding="utf-8") as f:
             f.write(f"User-agent: *\nAllow: /\nSitemap: {SITIO_URL}sitemap.xml\n")
-        with open(os.path.join(carpeta, "sitemap.xml"), "w") as f:
+        with open(os.path.join(carpeta, "sitemap.xml"), "w", encoding="utf-8") as f:
             f.write('<?xml version="1.0" encoding="UTF-8"?>\n'
                     '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
                     f"  <url><loc>{SITIO_URL}</loc><lastmod>{ahora:%Y-%m-%d}</lastmod>"
@@ -572,7 +653,7 @@ def rellenar_seo(html, pelis, dias, ahora):
     pelis de hoy (la página la reemplaza al cargar, pero Google la lee igual)."""
     import html as h
     presentes = {p["canal"] for p in pelis}
-    canales = [c for c in CANALES.values() if c in presentes]   # en el orden de CANALES
+    canales = [c for c in CANALES.values() if c in presentes]
     lista_canales = ", ".join(canales[:-1]) + " y " + canales[-1] if len(canales) > 1 else "".join(canales)
     hoy = [p for p in pelis if max(dia_tv(p), dias[0]) == dias[0] and p["fin"] > ahora
            and (p["puntaje"] or 0) >= PUNTAJE_MINIMO_RANKING]
@@ -674,11 +755,12 @@ header{position:sticky;top:0;z-index:5;background:rgba(14,13,18,.92);backdrop-fi
 .dia span{font-size:11px;color:var(--sub)}
 .dia.on{background:var(--acento);border-color:var(--acento);color:#1a1205}
 .dia.on span{color:#3d2b06}
-.barra{display:flex;gap:8px;padding:0 16px 12px;align-items:center}
+.barra{display:flex;gap:8px;padding:0 16px 12px;align-items:center;flex-wrap:wrap}
 .seg{display:flex;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:3px}
 .seg button{border:0;background:none;padding:6px 12px;border-radius:7px;font-size:13px;font-weight:600;color:var(--sub);cursor:pointer}
 .seg button.on{background:var(--panel2);color:var(--txt)}
-select{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:7px 8px;font-size:13px;flex:1;min-width:0}
+select,.buscar{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:7px 10px;font-size:13px;flex:1;min-width:110px}
+.buscar::placeholder{color:var(--dim)}
 .filtro-btn{border:1px solid var(--line);background:var(--panel);border-radius:10px;padding:7px 11px;font-size:13px;cursor:pointer;white-space:nowrap}
 .filtro-btn.on{border-color:var(--acento);color:var(--acento)}
 .filtros{display:none;padding:0 16px 14px;gap:12px;flex-direction:column}
@@ -700,8 +782,7 @@ main{display:flex;flex-direction:column;gap:14px;padding:6px 16px}
 .banner img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;z-index:1}
 .banner .ph{position:absolute;inset:0;padding:16px 70px 0 16px;font-size:26px;font-weight:900;
   letter-spacing:-.03em;line-height:1.05;color:rgba(255,255,255,.2);overflow:hidden}
-.banner::after{z-index:1}
-.banner::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.25) 0%,transparent 35%,transparent 55%,rgba(23,22,29,.95) 100%)}
+.banner::after{content:"";position:absolute;inset:0;z-index:1;background:linear-gradient(180deg,rgba(0,0,0,.25) 0%,transparent 35%,transparent 55%,rgba(23,22,29,.95) 100%)}
 .pts{position:absolute;top:10px;right:10px;z-index:2;font-weight:800;font-size:15px;padding:4px 9px;border-radius:9px;
   color:#14120a;display:flex;gap:4px;align-items:baseline}
 .pts small{font-size:9px;font-weight:700;opacity:.7}
@@ -761,6 +842,7 @@ main{display:flex;flex-direction:column;gap:14px;padding:6px 16px}
       <option value="hora">Por horario</option>
       <option value="canal">Por canal</option>
     </select>
+    <input type="search" id="q" class="buscar" placeholder="Buscar…" aria-label="Buscar">
     <button class="filtro-btn" id="fbtn">Filtros</button>
   </div>
   <div class="filtros" id="filtros">
@@ -792,44 +874,60 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const hhmm = d => d.toLocaleTimeString("es-AR", {hour:"2-digit", minute:"2-digit", hour12:false});
 const pelis = D.pelis.map((p, i) => ({...p, i, ini:new Date(p.ini), fin:new Date(p.fin)}));
-const abiertos = new Set();   // lo que el usuario desplegó (sobrevive al redibujado)
+const abiertos = new Set();
 const progs = (D.progs || []).map((p, i) => ({...p, i, ini:new Date(p.ini), fin:new Date(p.fin)}));
 const SECS = [["pelis", "Películas"], ["series", "Series"], ["deportes", "Deportes"], ["noticias", "Noticias"], ["aire", "Aire"], ["documentales", "Documentales"]]
   .filter(([k]) => k === "pelis" || progs.some(p => p.s === k));
 const canalesDe = sec => [...new Set((sec === "pelis" ? pelis : progs.filter(p => p.s === sec)).map(p => p.canal))].sort();
 
 // --- estado (se recuerda en el teléfono) ---
-const def = {seccion:"pelis", vista:"todas", orden:"puntaje", min:6, term:false, apagados:[]};
+const def = {seccion:"pelis", vista:"todas", orden:"puntaje", min:6, term:false, apagados:[], q:""};
 let est = {...def};
 try { Object.assign(est, JSON.parse(localStorage.getItem("pelis-est") || "{}")); } catch(e) {}
-const guardar = () => { try { localStorage.setItem("pelis-est", JSON.stringify(est)); } catch(e) {} };
+est.q = "";
+const guardar = () => {
+  try {
+    const copia = {...est};
+    delete copia.q;
+    localStorage.setItem("pelis-est", JSON.stringify(copia));
+  } catch(e) {}
+};
 delete est.sinp;
 
-// --- días: se calculan con el reloj del teléfono, no con la hora en que se generó la página ---
+// --- días: se calculan con el reloj del teléfono ---
 const TZ = "America/Argentina/Buenos_Aires";
-const fechaAR = d => d.toLocaleDateString("en-CA", {timeZone: TZ});           // "2026-10-26"
+const fechaAR = d => d.toLocaleDateString("en-CA", {timeZone: TZ});
 const iniDia = iso => new Date(iso + "T00:00:00-03:00");
 const finDia = iso => new Date(iniDia(iso).getTime() + 864e5);
-// Un día de tele va de las 00:00 hasta las 05:00 del día siguiente: la trasnoche aparece
-// en los dos días, y lo que ya está al aire a la mañana aparece en el día de hoy.
 const enDia = (p, iso) => p.ini < new Date(finDia(iso).getTime() + 5 * 36e5) && p.fin > iniDia(iso);
 const ultimaFecha = [...pelis, ...progs].reduce((m, p) => { const f = fechaAR(p.ini); return f > m ? f : m; }, "");
 const DIAS_CORTOS = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
+
 function listaDias() {
   const hoy = fechaAR(new Date()), dias = [];
   for (let f = hoy < ultimaFecha ? hoy : ultimaFecha; f <= ultimaFecha; f = fechaAR(new Date(finDia(f).getTime() + 36e5))) {
-    const d = iniDia(f);
     dias.push({fecha: f, corto: f === hoy ? "Hoy" : DIAS_CORTOS[new Date(f + "T12:00:00-03:00").getUTCDay()],
                num: f.slice(8, 10) + "/" + f.slice(5, 7)});
   }
   return dias;
 }
+
 let diasHtml = "";
 function pintarDias() {
   const dias = listaDias();
-  if (!dias.some(d => d.fecha === est.dia)) est.dia = dias[0]?.fecha;   // si pasó la medianoche, saltar a hoy
+  if (!dias.some(d => d.fecha === est.dia)) est.dia = dias[0]?.fecha;
   const html = dias.map(d => `<button class="dia" data-d="${d.fecha}"><b>${esc(d.corto)}</b><span>${esc(d.num)}</span></button>`).join("");
   if (html !== diasHtml) { $("#dias").innerHTML = diasHtml = html; }
+}
+
+let secCanalesActual = "";
+function pintarCanales() {
+  const lista = canalesDe(est.seccion);
+  const clave = est.seccion + ":" + lista.join(",");
+  if (clave !== secCanalesActual) {
+    $("#canales").innerHTML = lista.map(c => `<button class="canal-chip" data-c="${esc(c)}">${esc(c)}</button>`).join("");
+    secCanalesActual = clave;
+  }
 }
 
 $("#gen").textContent = "Actualizado " + D.generado;
@@ -841,6 +939,7 @@ $("#secs").onclick = e => { const b = e.target.closest(".sec"); if (b) { est.sec
 $("#dias").onclick = e => { const b = e.target.closest(".dia"); if (b) { est.dia = b.dataset.d; pintar(); scrollTo({top:0}); } };
 $("#vista").onclick = e => { const b = e.target.closest("button"); if (b) { est.vista = b.dataset.v; guardar(); pintar(); } };
 $("#orden").onchange = e => { est.orden = e.target.value; guardar(); pintar(); };
+$("#q").oninput = e => { est.q = e.target.value.trim().toLowerCase(); pintar(); };
 $("#fbtn").onclick = () => $("#filtros").classList.toggle("abierto");
 $("#min").oninput = e => { est.min = +e.target.value; guardar(); pintar(); };
 $("#term").onchange = e => { est.term = e.target.checked; guardar(); pintar(); };
@@ -851,14 +950,27 @@ $("#canales").onclick = e => {
   guardar(); pintar();
 };
 
-// --- rutina: se recalcula en el momento, con la hora actual ---
+function coincideBusqueda(p, q) {
+  if (!q) return true;
+  return (p.titulo && p.titulo.toLowerCase().includes(q)) ||
+         (p.sub && p.sub.toLowerCase().includes(q)) ||
+         (p.genero && p.genero.toLowerCase().includes(q)) ||
+         (p.sinopsis && p.sinopsis.toLowerCase().includes(q));
+}
+
+// --- rutina: se recalcula en el momento, con búsqueda binaria ---
 function armarRutina(lista) {
-  // elige pelis que no se pisen maximizando la suma de (puntaje - 6)^2
   const c = lista.filter(p => p.puntaje != null && p.puntaje >= D.minRutina).sort((a, b) => a.fin - b.fin);
   const n = c.length, mejor = new Array(n + 1).fill(0), prev = new Array(n + 1).fill(null);
   for (let i = 1; i <= n; i++) {
-    let j = i - 1;
-    while (j > 0 && c[j - 1].fin > c[i - 1].ini) j--;
+    let lo = 0, hi = i - 1;
+    const ini = c[i - 1].ini;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (c[mid].fin <= ini) lo = mid + 1;
+      else hi = mid;
+    }
+    const j = lo;
     const con = mejor[j] + (c[i - 1].puntaje - 6) ** 2;
     if (con > mejor[i - 1]) { mejor[i] = con; prev[i] = j; } else mejor[i] = mejor[i - 1];
   }
@@ -868,6 +980,7 @@ function armarRutina(lista) {
   }
   return r.reverse();
 }
+
 function alternativas(rutina, lista) {
   const alts = new Map(rutina.map(r => [r, []])), elegidas = new Set(rutina);
   for (const p of lista) {
@@ -883,7 +996,7 @@ function alternativas(rutina, lista) {
   return alts;
 }
 
-function fondo(canal) {   // color propio para cada canal cuando no hay imagen
+function fondo(canal) {
   let h = 0; for (const c of canal) h = (h * 31 + c.charCodeAt(0)) % 360;
   return `linear-gradient(135deg, hsl(${h} 45% 28%), hsl(${(h + 40) % 360} 40% 14%))`;
 }
@@ -946,7 +1059,7 @@ function fila(p, ahora) {
 
 function pintarSeccion(ahora) {
   const lista = progs.filter(p => p.s === est.seccion && enDia(p, est.dia) &&
-    !est.apagados.includes(p.canal) && (est.term || p.fin > ahora));
+    !est.apagados.includes(p.canal) && (est.term || p.fin > ahora) && coincideBusqueda(p, est.q));
   const vivos = lista.filter(p => p.ini <= ahora && ahora < p.fin);
   const resto = lista.filter(p => !(p.ini <= ahora && ahora < p.fin));
   let html = "";
@@ -964,10 +1077,10 @@ function duracion(ms) {
 function pintar() {
   const ahora = new Date();
   pintarDias();
+  pintarCanales();
   const enPelis = est.seccion === "pelis";
   document.querySelectorAll(".sec").forEach(b => b.classList.toggle("on", b.dataset.s === est.seccion));
   document.querySelectorAll(".solo-pelis").forEach(el => el.classList.toggle("oculto", !enPelis));
-  $("#canales").innerHTML = canalesDe(est.seccion).map(c => `<button class="canal-chip" data-c="${esc(c)}">${esc(c)}</button>`).join("");
   document.querySelectorAll(".dia").forEach(b => b.classList.toggle("on", b.dataset.d === est.dia));
   document.querySelectorAll("#vista button").forEach(b => b.classList.toggle("on", b.dataset.v === est.vista));
   document.querySelectorAll(".canal-chip").forEach(b => b.classList.toggle("on", !est.apagados.includes(b.dataset.c)));
@@ -979,7 +1092,8 @@ function pintar() {
   $("#orden").disabled = est.vista === "rutina";
   if (!enPelis) return pintarSeccion(ahora);
 
-  let lista = pelis.filter(p => enDia(p, est.dia) && !est.apagados.includes(p.canal) && (est.term || p.fin > ahora));
+  let lista = pelis.filter(p => enDia(p, est.dia) && !est.apagados.includes(p.canal) &&
+    (est.term || p.fin > ahora) && coincideBusqueda(p, est.q));
   let html = "";
   if (est.vista === "rutina") {
     const base = lista;
@@ -991,7 +1105,7 @@ function pintar() {
     });
     $("#cuenta").textContent = lista.length ? `Rutina de ${lista.length} películas sin superposiciones (${D.minRutina}+)` : "";
   } else {
-    lista = lista.filter(p => p.puntaje == null || p.puntaje >= est.min);   // las sin puntaje siempre se muestran
+    lista = lista.filter(p => p.puntaje == null || p.puntaje >= est.min);
     const orden = {
       puntaje: (a, b) => (b.puntaje ?? -1) - (a.puntaje ?? -1) || a.ini - b.ini,
       hora: (a, b) => a.ini - b.ini || (b.puntaje ?? -1) - (a.puntaje ?? -1),
@@ -1011,7 +1125,8 @@ $("#lista").addEventListener("click", e => {
   el.classList.toggle("abierta") ? abiertos.add(k) : abiertos.delete(k);
 });
 pintar();
-setInterval(pintar, 60000);   // actualiza "EN VIVO", la barra de avance, la rutina y el día de hoy
+setInterval(() => { if (!document.hidden) pintar(); }, 60000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) pintar(); });
 </script>
 </body>
 </html>
